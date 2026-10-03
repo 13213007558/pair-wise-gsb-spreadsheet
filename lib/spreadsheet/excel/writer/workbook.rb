@@ -1,4 +1,5 @@
 require "spreadsheet/excel/internals"
+require "spreadsheet/rich_text"
 require "spreadsheet/writer"
 require "spreadsheet/excel/writer/biff8"
 require "spreadsheet/excel/writer/format"
@@ -289,7 +290,16 @@ module Spreadsheet
 
         def write_fonts workbook, writer
           fonts = @fonts[workbook] = {}
-          @formats[workbook][:writers].map { |format| format.font }.compact.uniq.each do |font|
+          used = @formats[workbook][:writers].map { |format| format.font }
+          worksheets(workbook).each do |worksheet|
+            worksheet.strings.each_key do |string|
+              next unless string.is_a?(Spreadsheet::RichText)
+              string.runs.each do |run|
+                used << run.font if run.font.respond_to?(:key)
+              end
+            end
+          end
+          used.compact.uniq.each do |font|
             unless fonts.include?(font.key)
               fonts.store font.key, fonts.size
               write_font workbook, writer, font
@@ -449,61 +459,120 @@ module Spreadsheet
             @sst[worksheet] = sst
           end
           sst_size = strings.size
-          data = [total, sst_size].pack "V2"
-          op = 0x00fc
-          wide = 0
-          offsets = []
+          segments = [[:raw, [total, sst_size].pack("V2")]]
           strings.each_with_index do |string, idx|
             sst.store string, idx
-            op_offset = data.size + 4
-            if idx % SST_CHUNKSIZE == 0
-              offsets.push [offset + writer.pos + op_offset, op_offset]
-            end
-            header, packed, next_wide = _unicode_string string, 2
-            # the first few bytes (header + first character) must not be split
-            must_fit = header.size + wide + 1
-            while data.size + must_fit > @recordsize_limit
-              op, data, wide = write_string_part writer, op, data, wide
-            end
-            wide = next_wide
-            data << header << packed
+            segments.concat sst_entry_segments(workbook, string, idx)
           end
-          until data.empty?
-            op, data, wide = write_string_part writer, op, data, wide
-          end
+          offsets = write_sst_segments writer, offset, segments
           write_extsst workbook, offsets, writer
+        end
+
+        ##
+        # Build the list of segments that make up one Shared String:
+        # the string header (together with its first character, which must
+        # not be split across records), the character data, the Rich-Text
+        # formatting runs and the Asian phonetic extension data.
+        def sst_entry_segments workbook, string, idx
+          data = internal string
+          size = data.size / 2
+          data, wide = compress_unicode_string data
+          runs = []
+          ext = nil
+          if string.is_a?(Spreadsheet::RichText)
+            runs = string.runs
+            ext = string.ext_data
+          end
+          opts = wide
+          opts |= 0x08 unless runs.empty?
+          opts |= 0x04 if ext
+          header = [size, opts].pack "vC"
+          header << [runs.size].pack("v") unless runs.empty?
+          header << [ext.bytesize].pack("V") if ext
+          unless data.empty?
+            # the first few bytes (header + first character) must not be split
+            header << data.slice!(0, 1 + wide)
+          end
+          segments = [[:head, header, idx]]
+          segments << [:chars, data, wide] unless data.empty?
+          unless runs.empty?
+            packed = runs.sort_by(&:position).collect do |run|
+              font = run.font
+              font_idx = font.respond_to?(:key) ? font_index(workbook, font.key) : font.to_i
+              [run.position, font_idx].pack "v2"
+            end.join
+            segments << [:raw, packed]
+          end
+          segments << [:raw, ext] if ext
+          segments
+        end
+
+        ##
+        # Write the SST record and its CONTINUE records from a list of
+        # segments as built by #sst_entry_segments (preceded by a :raw
+        # segment with the string counts):
+        # * [:head, data, idx] - the header of a string and its first
+        #   character. Never split; kept together in one record. idx is the
+        #   string's index in the SST and is used for the EXTSST record.
+        # * [:chars, data, wide] - character data. May be split across
+        #   records; every continuation starts with an option flags byte and
+        #   characters are never cut in half.
+        # * [:raw, data] - formatting runs or extension data. May be split
+        #   across records as well, but such continuations start directly
+        #   with data, without an option flags byte.
+        def write_sst_segments writer, offset, segments
+          op = 0x00fc
+          payload = "".dup
+          written = 0
+          offsets = []
+          flush = lambda do
+            writer.write [op, payload.size].pack "v2"
+            writer.write payload
+            written += OPCODE_SIZE + payload.size
+            op = 0x003c
+            payload = "".dup
+          end
+          segments.each do |type, data, aux|
+            case type
+            when :head
+              flush.call if payload.size + data.size > @recordsize_limit
+              if aux && (aux % SST_CHUNKSIZE == 0)
+                op_offset = payload.size + OPCODE_SIZE
+                offsets.push [offset + written + op_offset, op_offset]
+              end
+              payload << data
+            when :chars
+              wide = aux
+              pos = 0
+              size = data.size
+              while pos < size
+                space = @recordsize_limit - payload.size
+                if space < 1 + wide
+                  flush.call
+                  payload << wide.chr
+                  next
+                end
+                space -= space % (1 + wide)
+                payload << data[pos, space]
+                pos += space
+              end
+            else
+              pos = 0
+              size = data.size
+              while pos < size
+                flush.call if payload.size >= @recordsize_limit
+                take = @recordsize_limit - payload.size
+                payload << data[pos, take]
+                pos += take
+              end
+            end
+          end
+          flush.call unless payload.empty?
+          offsets
         end
 
         def write_sst_changes workbook, writer, offset, total, strings
           _write_sst workbook, writer, offset, total, strings
-        end
-
-        def write_string_part writer, op, data, wide
-          bef = data.size
-          ## if we're writing wide characters, we need to make sure we don't cut
-          #  characters in half
-          if wide > 0 && data.size > @recordsize_limit
-            remove = @recordsize_limit - bef
-            remove -= remove % 2
-            rest = data.slice!(remove..-1)
-            write_op writer, op, data
-            data = rest
-          else
-            data = write_op writer, op, data
-          end
-          op = 0x003c
-          # Unicode strings are split in a special way. At the beginning of each
-          # CONTINUE record the option flags byte is repeated. Only the
-          # character size flag will be set in this flags byte, the Rich-Text
-          # flag and the Far-East flag are set to zero.
-          unless data.empty?
-            if wide == 1
-              # check if we can compress the rest of the string
-              data, wide = compress_unicode_string data
-            end
-            data = [wide].pack("C") << data
-          end
-          [op, data, wide]
         end
 
         def write_styles workbook, writer
@@ -612,7 +681,7 @@ module Spreadsheet
         end
 
         def sst_index worksheet, str
-          @sst[worksheet][str]
+          @sst[worksheet][Spreadsheet::RichText.coerce(str)]
         end
 
         def xf_index workbook, format

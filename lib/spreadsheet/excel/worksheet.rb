@@ -100,6 +100,10 @@ module Spreadsheet
         @workbook.shared_string idx
       end
 
+      def shared_rich_string idx
+        @workbook.shared_rich_string idx
+      end
+
       private
 
       ## premature optimization?

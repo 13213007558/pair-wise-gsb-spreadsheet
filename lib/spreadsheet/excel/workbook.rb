@@ -77,6 +77,19 @@ module Spreadsheet
         @sst[idx.to_i].content
       end
 
+      ##
+      # Like #shared_string, but returns a Spreadsheet::RichText (including
+      # formatting runs and extended data) if the Shared String carries
+      # Rich-Text information.
+      def shared_rich_string idx
+        entry = @sst[idx.to_i]
+        if entry.rich?
+          entry.rich_text
+        else
+          entry.content
+        end
+      end
+
       def sst_size
         @sst.size
       end

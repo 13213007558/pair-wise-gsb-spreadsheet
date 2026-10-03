@@ -1,3 +1,10 @@
+### Unreleased
+* Read and write Rich-Text formatting runs and Asian phonetic extension
+  data (ExtRst) of Shared Strings: cells with rich text are returned as
+  Spreadsheet::RichText, a String subclass carrying the formatting runs.
+  SST/CONTINUE handling now supports compression switches, split formatting
+  runs and split extension data across record boundaries.
+
 ### 1.3.5 21.04.2026
 Author: Elliot Crosby-McCullough <elliot@dexory.com>
 * Add a patch to handle badly formed XLS files (PR #281)
@@ -890,5 +897,4 @@ also see: https://github.com/zdavatz/spreadsheet/pull/21
   * Initial upload of the shiny new Spreadsheet Gem after three weeks of
     grueling labor in the dark binary mines of Little-Endian Biff and long
     hours spent polishing the surfaces of documentation.
-
 

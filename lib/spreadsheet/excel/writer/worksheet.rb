@@ -1,4 +1,5 @@
 require "stringio"
+require "spreadsheet/rich_text"
 require "spreadsheet/excel/writer/biff8"
 require "spreadsheet/excel/internals"
 require "spreadsheet/excel/internals/biff8"
@@ -131,7 +132,12 @@ module Spreadsheet
         def strings
           @worksheet.each_with_object(Hash.new(0)) do |row, memo|
             row.each do |cell|
-              memo[cell] += 1 if cell.is_a?(String) && !cell.empty?
+              if cell.is_a?(String) && !cell.empty?
+                ## normalize to RichText so that deduplication compares
+                ## text, formatting runs and extended data (see
+                ## Spreadsheet::RichText)
+                memo[Spreadsheet::RichText.coerce(cell)] += 1
+              end
             end
           end
         end

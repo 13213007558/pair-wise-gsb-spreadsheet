@@ -44,37 +44,20 @@ module Spreadsheet
         end
 
         ##
-        # When a String is too long for one Opcode, it is continued in a Continue
-        # Opcode. Excel may reconsider compressing the remainder of the string.
-        # This method only evaluates the header and registers the address of the
-        # continuation with the previous SstEntry.
-        def continue_string_header work, oppos
-          opts, _ = work.unpack "C"
-          wide = opts & 1
-          owing = @incomplete_sst.continued_chars
-          size = [work.size, owing * (1 + wide) + 1].min
-          chars = (size - 1) / (1 + wide)
-          skip = size
-          @incomplete_sst.continue oppos + OPCODE_SIZE, size, chars
-          unless @incomplete_sst.continued?
-            @workbook.add_shared_string @incomplete_sst
-            skip += @incomplete_skip
-            @incomplete_sst = nil
-            @incomplete_skip = nil
-          end
-          skip
-        end
-
         ##
         # Read more data into the Shared String Table. (see also: #read_sst)
-        # This method only evaluates the header, the actual work is done in #_read_sst
+        # A CONTINUE record only starts with an option flags byte when the
+        # previous record ended within the character data of a string: only
+        # then may Excel reconsider compressing the remainder of the string.
+        # When Rich-Text formatting runs or Asian phonetic extension data are
+        # split across records, or when a record boundary falls between two
+        # strings, the continuation starts directly with data.
         def continue_sst work, oppos, len
           pos = 0
-          if @incomplete_sst
-            pos = continue_string_header work, oppos
-          elsif !@incomplete_skip.nil?
-            pos = @incomplete_skip
-            @incomplete_skip = nil
+          if (state = @incomplete_sst) && state[:chars_left] > 0
+            opts, _ = work.unpack "C"
+            state[:wide] = opts & 1
+            pos = 1
           end
           @sst_offset[1] += len
           _read_sst work, oppos, pos
@@ -82,7 +65,7 @@ module Spreadsheet
 
         def postread_workbook # :nodoc:
           super
-          @incomplete_string, @sst_size, @sst_offset, @incomplete_sst = nil, @incomplete_skip = nil
+          @incomplete_string = @sst_size = @sst_offset = @incomplete_sst = nil
         end
 
         ##
@@ -168,6 +151,8 @@ module Spreadsheet
           richtext = (opts >> 3) & 1
           size = chars * (wide + 1)
           skip = 0
+          runs = 0
+          psize = 0
           if richtext > 0
             runs, = work[offset + 1 + count_length, 2].unpack "v"
             skip = 4 * runs
@@ -180,7 +165,7 @@ module Spreadsheet
           avbl = [work.size - offset, flagsize + size].min
           have_chrs = (avbl - flagsize) / (1 + wide)
           owing = chars - have_chrs
-          [chars, flagsize, wide, phonetic, richtext, avbl, owing, skip]
+          [chars, flagsize, wide, phonetic, richtext, avbl, owing, skip, runs, psize]
         end
 
         def read_range_address_list work, len
@@ -218,24 +203,63 @@ module Spreadsheet
         # Read the Shared String Table present in all Biff8 Files.
         def _read_sst work, oppos, pos
           worksize = work.size
+          base = oppos + OPCODE_SIZE
           while @workbook.sst_size < @sst_size && pos < worksize
-            sst = SstEntry.new offset: oppos + OPCODE_SIZE + pos,
-              ole: @data,
-              reader: self
-            sst.chars, sst.flags, wide, sst.phonetic, sst.richtext, sst.available,
-              sst.continued_chars, skip = read_string_header work, 2, pos
-            sst.wide = wide > 0
-            if sst.continued?
-              @incomplete_sst = sst
-              @incomplete_skip = skip
-              pos += sst.available
-            else
-              @workbook.add_shared_string sst
-              pos += sst.available + skip
-              if pos > worksize
-                @incomplete_skip = pos - worksize
+            start = pos
+            unless @incomplete_sst
+              sst = SstEntry.new offset: base + pos,
+                ole: @data,
+                reader: self,
+                workbook: @workbook
+              chars, flags, wide, phonetic, richtext, _, _, _, runs, psize =
+                read_string_header work, 2, pos
+              sst.chars = chars
+              sst.flags = flags
+              sst.wide = wide > 0
+              sst.phonetic = phonetic
+              sst.richtext = richtext
+              sst.runs_count = runs
+              sst.ext_size = psize
+              @incomplete_sst = {
+                entry: sst,
+                chars_left: chars,
+                wide: wide,
+                runs_left: runs * 4,
+                ext_left: psize
+              }
+              pos += flags
+            end
+            state = @incomplete_sst
+            sst = state[:entry]
+            if state[:chars_left] > 0
+              wide = state[:wide]
+              take = [worksize - pos, state[:chars_left] * (1 + wide)].min
+              take -= take % (1 + wide)
+              if take > 0
+                sst.add_chunk :chars, base + pos, take, wide
+                state[:chars_left] -= take / (1 + wide)
+                pos += take
               end
             end
+            if state[:chars_left] == 0 && state[:runs_left] > 0 && pos < worksize
+              take = [worksize - pos, state[:runs_left]].min
+              sst.add_chunk :runs, base + pos, take
+              state[:runs_left] -= take
+              pos += take
+            end
+            if state[:chars_left] == 0 && state[:runs_left] == 0 &&
+                state[:ext_left] > 0 && pos < worksize
+              take = [worksize - pos, state[:ext_left]].min
+              sst.add_chunk :ext, base + pos, take
+              state[:ext_left] -= take
+              pos += take
+            end
+            if state[:chars_left] == 0 && state[:runs_left] == 0 &&
+                state[:ext_left] == 0
+              @workbook.add_shared_string sst
+              @incomplete_sst = nil
+            end
+            break if pos == start && @incomplete_sst
           end
         end
       end

@@ -79,6 +79,59 @@ with the equivalent index:
 row.format 2
 ```
 
+## Rich Text
+
+Cells whose text uses more than one font are returned as
+`Spreadsheet::RichText`, a `String` subclass that carries the formatting
+runs of the Shared String it was read from:
+
+```ruby
+cell = sheet1.row(0)[0]
+if cell.is_a?(Spreadsheet::RichText)
+  cell.runs.each do |run|
+    puts "from #{run.position}: #{run.font.name}"
+  end
+end
+```
+
+Run positions are counted in UTF-16 code units, exactly as they are stored
+in the file. For characters outside the Basic Multilingual Plane (which are
+stored as surrogate pairs) this differs from Ruby character indices; use
+`utf16_position`, `ruby_position` and `runs_by_char` to convert:
+
+```ruby
+cell.ruby_position cell.runs[1].position
+```
+
+A RichText may also carry `ext_data`: the raw bytes of the Asian phonetic
+settings block. Spreadsheet does not interpret this data, but preserves it
+verbatim when a Workbook is written back.
+
+To write Rich Text, push a RichText into a row:
+
+```ruby
+rich = Spreadsheet::RichText.new 'Hello brave world'
+rich.runs = [
+  Spreadsheet::RichText::Run.new(0, Spreadsheet::Font.new('Arial')),
+  Spreadsheet::RichText::Run.new(6, Spreadsheet::Font.new('Courier'))
+]
+sheet1.row(1).push rich
+```
+
+Two RichTexts with equal text but different runs or ext_data are stored as
+separate Shared Strings - formatting is never lost by deduplication.
+
+When you edit the text of a RichText, use `replace_text` to have the runs
+adjusted: runs in the common prefix keep their position, runs in the common
+suffix are shifted by the change in length, runs inside the replaced region
+are removed, and a run is kept at position 0 as long as the text has any
+runs left:
+
+```ruby
+rich.replace_text 'Hello beautiful world'
+sheet1.row(1)[0] = rich
+```
+
 ## Writing is easy
 As before, make sure you have Spreadsheet required and the client_encoding
 set. Then make a new Workbook:

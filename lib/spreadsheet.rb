@@ -27,6 +27,7 @@
 require "spreadsheet/version"
 require "spreadsheet/errors"
 
+require "spreadsheet/rich_text"
 require "spreadsheet/excel/workbook"
 require "spreadsheet/excel/reader"
 require "spreadsheet/excel/rgb"

@@ -645,7 +645,7 @@ module Spreadsheet
         #      4     2  Index to XF record (➜ 6.115)
         #      6     4  Index into SST record (➜ 6.96)
         row, column, xf, index = work.unpack binfmt(:labelsst)
-        set_cell worksheet, row, column, xf, worksheet.shared_string(index)
+        set_cell worksheet, row, column, xf, worksheet.shared_rich_string(index)
       end
 
       def read_mulblank worksheet, addr, work

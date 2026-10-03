@@ -69,20 +69,13 @@ module Spreadsheet
         # Read more data into the Shared String Table. (see also: #read_sst)
         # This method only evaluates the header, the actual work is done in #_read_sst
         def continue_sst work, oppos, len
-          pos = 0
-          if @incomplete_sst
-            pos = continue_string_header work, oppos
-          elsif !@incomplete_skip.nil?
-            pos = @incomplete_skip
-            @incomplete_skip = nil
-          end
+          @sst_parser.continue work
           @sst_offset[1] += len
-          _read_sst work, oppos, pos
         end
 
         def postread_workbook # :nodoc:
           super
-          @incomplete_string, @sst_size, @sst_offset, @incomplete_sst = nil, @incomplete_skip = nil
+          @incomplete_string, @sst_size, @sst_offset, @sst_parser = nil
         end
 
         ##
@@ -103,7 +96,8 @@ module Spreadsheet
           _, @sst_size = work.unpack "V2"
           @sst_offset = [pos, len]
           @workbook.offsets.store :sst, @sst_offset
-          _read_sst work, pos, 8
+          @sst_parser = SstParser.new(@workbook)
+          @sst_parser.start work
         end
 
         ##
@@ -213,31 +207,6 @@ module Spreadsheet
         end
 
         private
-
-        ##
-        # Read the Shared String Table present in all Biff8 Files.
-        def _read_sst work, oppos, pos
-          worksize = work.size
-          while @workbook.sst_size < @sst_size && pos < worksize
-            sst = SstEntry.new offset: oppos + OPCODE_SIZE + pos,
-              ole: @data,
-              reader: self
-            sst.chars, sst.flags, wide, sst.phonetic, sst.richtext, sst.available,
-              sst.continued_chars, skip = read_string_header work, 2, pos
-            sst.wide = wide > 0
-            if sst.continued?
-              @incomplete_sst = sst
-              @incomplete_skip = skip
-              pos += sst.available
-            else
-              @workbook.add_shared_string sst
-              pos += sst.available + skip
-              if pos > worksize
-                @incomplete_skip = pos - worksize
-              end
-            end
-          end
-        end
       end
     end
   end

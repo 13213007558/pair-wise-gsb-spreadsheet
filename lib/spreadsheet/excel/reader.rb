@@ -7,6 +7,7 @@ require "spreadsheet/noteObject"
 require "spreadsheet/excel/error"
 require "spreadsheet/excel/internals"
 require "spreadsheet/excel/sst_entry"
+require "spreadsheet/excel/sst_parser"
 require "spreadsheet/excel/worksheet"
 
 module Spreadsheet

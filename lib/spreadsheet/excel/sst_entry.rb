@@ -1,48 +1,31 @@
-require "spreadsheet/encodings"
+require "spreadsheet/rich_text"
 
 module Spreadsheet
   module Excel
     ##
     # Shared String Table Entry
     class SstEntry
-      include Spreadsheet::Encodings
+      attr_accessor :chars, :flags, :wide, :wide_continuation_without_flag,
+        :richtext, :phonetic,
+        :raw_runs, :phonetic_data, :ext_data, :content, :suffix_size
+      attr_writer :extended
 
-      attr_accessor :chars, :phonetic, :richtext, :flags, :available,
-        :continued_chars, :wide
       def initialize opts = {}
-        @content = nil
-        @offset = opts[:offset]
-        @ole = opts[:ole]
-        @reader = opts[:reader]
-        @continuations = []
+        @chars = opts[:chars]
+        @flags = opts[:flags]
+        @wide = opts[:wide]
+        @richtext = opts[:richtext] || 0
+        @phonetic = opts[:phonetic] || 0
+        @raw_runs = ""
+        @phonetic_data = ""
+        @ext_data = ""
+        @content = opts[:content]
+        @suffix_size = 0
+        @extended = false
       end
 
-      ##
-      # Access the contents of this Shared String
-      def content
-        @content or begin
-          data = @ole[@offset, @available]
-          content, _ = @reader.read_string_body data, @flags, @available, @wide
-          @continuations.each do |offset, len|
-            @reader.continue_string(@ole[offset, len], [content, @chars])
-          end
-          content = client content, "UTF-16LE"
-          if @reader.memoize?
-            @content = content
-          end
-          content
-        end
-      end
-
-      ##
-      # Register the offset of a String continuation
-      def continue offset, size, chars
-        @continued_chars -= chars
-        @continuations.push [offset, size]
-      end
-
-      def continued? # :nodoc:
-        @continued_chars > 0
+      def extended?
+        @extended || (@flags && (@flags & 0x04) == 0x04)
       end
     end
   end

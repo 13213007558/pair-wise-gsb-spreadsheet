@@ -289,12 +289,21 @@ module Spreadsheet
 
         def write_fonts workbook, writer
           fonts = @fonts[workbook] = {}
-          @formats[workbook][:writers].map { |format| format.font }.compact.uniq.each do |font|
+          font_list = @formats[workbook][:writers].map { |format| format.font }.compact
+          font_list.concat rich_text_fonts(workbook)
+          font_list.uniq { |font| font.key }.each do |font|
             unless fonts.include?(font.key)
+              workbook.add_font font
               fonts.store font.key, fonts.size
               write_font workbook, writer, font
             end
           end
+        end
+
+        def rich_text_fonts workbook
+          shared_strings(workbook).grep(RichText).flat_map do |string|
+            string.runs.map(&:font).compact
+          end.uniq(&:key)
         end
 
         def write_formats workbook, writer
@@ -433,10 +442,11 @@ module Spreadsheet
           #      4     4  Number of following strings (nm)
           #      8  var.  List of nm Unicode strings, 16-bit string length (➜ 3.4)
           num_total = 0
-          strings = worksheets(workbook).each_with_object(Hash.new(0)) do |worksheet, memo|
-            worksheet.strings.each do |k, v|
-              memo[k] += v
-              num_total += v
+          strings = Hash.new(0)
+          worksheets(workbook).each do |worksheet|
+            worksheet.strings.each do |key, count|
+              strings[key] += count
+              num_total += count
             end
           end
           _write_sst workbook, writer, offset, num_total, strings.keys
@@ -451,7 +461,6 @@ module Spreadsheet
           sst_size = strings.size
           data = [total, sst_size].pack "V2"
           op = 0x00fc
-          wide = 0
           offsets = []
           strings.each_with_index do |string, idx|
             sst.store string, idx
@@ -459,19 +468,111 @@ module Spreadsheet
             if idx % SST_CHUNKSIZE == 0
               offsets.push [offset + writer.pos + op_offset, op_offset]
             end
-            header, packed, next_wide = _unicode_string string, 2
-            # the first few bytes (header + first character) must not be split
-            must_fit = header.size + wide + 1
-            while data.size + must_fit > @recordsize_limit
-              op, data, wide = write_string_part writer, op, data, wide
-            end
-            wide = next_wide
-            data << header << packed
+            op, data = write_sst_entry workbook, writer, op, data, string
           end
           until data.empty?
-            op, data, wide = write_string_part writer, op, data, wide
+            data = write_op writer, op, data
+            op = 0x003c
           end
           write_extsst workbook, offsets, writer
+        end
+
+        def write_sst_entry workbook, writer, op, data, string
+          text = internal string
+          units = text.bytesize / 2
+          rich_runs = string.is_a?(RichText) ? string.runs : []
+          ext_data = string.respond_to?(:ext_data) ? string.ext_data.to_s : ""
+          options = 0
+          options |= 0x08 unless rich_runs.empty?
+          options |= 0x04 unless ext_data.empty?
+          first_wide = units.zero? ? false : text.getbyte(1) != 0
+          options |= 1 if first_wide
+          header = [units, options].pack("vC")
+          header << [rich_runs.size].pack("v") unless rich_runs.empty?
+          suffix = rich_runs.collect do |run|
+            [run.start, sst_run_font_index(workbook, run)].pack("v2")
+          end.join
+          suffix << ext_data
+          first_size = first_wide ? 2 : 1
+          op, data = flush_sst_data(writer, op, data, header.bytesize + first_size)
+          data << header
+          position = 0
+          until position >= units
+            if position > 0
+              next_wide = text.getbyte(position * 2 + 1) != 0
+              op, data = flush_sst_data(writer, op, data, next_wide ? 3 : 2)
+              data << "\x00".b
+            end
+            capacity = @recordsize_limit - data.bytesize
+            if position.zero?
+              compressed, wide = sst_text_part(text, position, capacity, false)
+            else
+              compressed, wide = sst_text_part(text, position, capacity - 1, true)
+            end
+            if wide
+              data[-1] = [1].pack("C") if position > 0
+              data << compressed
+            else
+              data << compressed
+            end
+            position += compressed.bytesize / (wide ? 2 : 1)
+          end
+          suffix_position = 0
+          while suffix_position < suffix.bytesize
+            capacity = @recordsize_limit - data.bytesize
+            if capacity.zero?
+              data = write_op writer, op, data
+              op = 0x003c
+              next
+            end
+            bytes = [capacity, suffix.bytesize - suffix_position].min
+            data << suffix.byteslice(suffix_position, bytes)
+            suffix_position += bytes
+          end
+          [op, data]
+        end
+
+        def sst_text_part text, position, capacity, _continuation
+          low_units = 0
+          while position + low_units < text.bytesize / 2 &&
+              low_units < capacity &&
+              text.getbyte((position + low_units) * 2 + 1) == 0
+            low_units += 1
+          end
+          if low_units.positive?
+            compressed = text.byteslice(position * 2, low_units * 2)
+              .bytes.each_slice(2).collect(&:first).pack("C*")
+            [compressed, false]
+          else
+            wide_units = [text.bytesize / 2 - position, capacity / 2].min
+            wide_units -= 1 if wide_units > 1 &&
+              wide_units < text.bytesize / 2 - position &&
+              (0xd800..0xdbff).cover?(text.byteslice((position + wide_units - 1) * 2, 2).unpack1("v"))
+            wide_part = text.byteslice(position * 2, wide_units * 2)
+            [wide_part, true]
+          end
+        end
+
+        def flush_sst_data writer, op, data, required
+          while data.bytesize + required > @recordsize_limit
+            data = write_op writer, op, data
+            op = 0x003c
+          end
+          [op, data]
+        end
+
+        def sst_run_font_index workbook, run
+          if run.font
+            font_index workbook, run.font.key
+          elsif run.font_index && run.font_index > 3
+            run.font_index + 1
+          else
+            run.font_index || 0
+          end
+        end
+
+        def shared_strings workbook
+          worksheets(workbook).flat_map { |worksheet| worksheet.strings.keys }
         end
 
         def write_sst_changes workbook, writer, offset, total, strings

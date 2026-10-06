@@ -12,7 +12,8 @@ module Spreadsheet
       include Spreadsheet::Excel::Offset
 
       offset :dimensions
-      attr_reader :offset, :ole, :links, :guts, :notes, :row_addresses
+      attr_reader :offset, :ole, :links, :guts, :notes, :row_addresses,
+        :shared_formulas
       def initialize opts = {}
         @row_addresses = nil
         super
@@ -21,6 +22,14 @@ module Spreadsheet
         @links = {}
         @guts = {}
         @notes = {}
+        @shared_formulas = {}
+      end
+
+      ##
+      # Store the token array of a shared (SHRFMLA) or array (ARRAY) formula,
+      # keyed by the [row, column] of its anchor cell.
+      def add_shared_formula anchor, tokens
+        @shared_formulas.store anchor, tokens
       end
 
       def add_link row, column, link

@@ -339,6 +339,23 @@ forget to include the offending code-snippet!
 All compatibility code is deprecated and will be removed in version 1.0.0
 
 ## Cautionary note about cell content length
+## Inspecting formulas (BIFF8)
+Cells containing a formula hold a Spreadsheet::Formula object. Besides the
+cached result (#value), you can inspect the formula itself. This is a
+read-only view: Spreadsheet does not calculate formulas.
+
+    formula = sheet[3, 1]
+    formula.ast          # the formula as an abstract syntax tree
+    formula.dependencies # cells, ranges and defined names the formula uses
+    formula.to_s         # the formula as text, e.g. "=SUM(Sheet2!A1:B2)*2"
+
+Shared formulas are expanded in the context of their owning cell, so a
+relative reference resolves to a different cell for every formula cell.
+References to other worksheets (3D references) carry the sheet names;
+defined names and external workbook references keep their identity, but
+external files are never read. Tokens that cannot be parsed are returned as
+Spreadsheet::Formula::Ast::Unknown nodes with their offset and raw bytes.
+
 For offline versions of Excel there is a limitation on the maximum length of
 the contents that can be written to a single cell of 32KB. Spreadsheet will
 allow you to exceed that limit, however Excel will interpret this as file

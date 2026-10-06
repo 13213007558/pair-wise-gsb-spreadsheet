@@ -339,7 +339,7 @@ module Spreadsheet
         xct: 0x0059, #    ○○ ●  XCT ➜ 6.114
         crn: 0x005a, #       ●● CRN ➜ 6.24
         externsheet: 0x0017, # ●  EXTERNSHEET ➜ 6.39
-        name: 0x0218, # ○○ NAME ➜ 6.66
+        name: 0x0018, # ○○ NAME ➜ 6.66
         ##########################
         window1: 0x003d, # ●  WINDOW1 ➜ 6.108 (has information on
         #              which Spreadsheet is 'active')

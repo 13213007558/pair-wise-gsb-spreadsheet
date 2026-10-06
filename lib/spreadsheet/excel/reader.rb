@@ -350,6 +350,105 @@ module Spreadsheet
         @formats.store idx, client(value, @workbook.encoding)
       end
 
+      def read_name work, pos, len
+        return unless @workbook.biff_version == 8
+        # Offset  Size  Contents
+        #      0     2  Option flags
+        #      2     1  Keyboard shortcut
+        #      3     1  Length of the name (cch)
+        #      4     2  Size of the formula data (cce)
+        #      6     2  Not used
+        #      8     2  Index to the sheet for sheet-local names (0 = global)
+        #     10     4  Lengths of menu/description/help/status texts (1 byte
+        #               each)
+        #     14  var.  Name (Unicode string without a length field)
+        #    var.  var.  Formula data (RPN token array)
+        flags, _key, cch, cce = work.unpack "vC2v"
+        sheet_index = work[8, 2].unpack1 "v"
+        wide = (work.getbyte(14) & 0x01) > 0
+        size = cch * (wide ? 2 : 1)
+        raw = work[15, size] || ""
+        raw = wide(raw) unless wide
+        @workbook.add_defined_name name: client(raw, "UTF-16LE"),
+          tokens: work[15 + size, cce],
+          sheet_index: sheet_index,
+          flags: flags
+      end
+
+      def read_externsheet work, pos, len
+        return unless @workbook.biff_version == 8
+        # Offset  Size  Contents
+        #      0     2  Number of following structures (nm)
+        #      2  6∙nm  List of nm EXTERNSHEET structures, each containing:
+        #               2 bytes: Index to the SUPBOOK record
+        #               2 bytes: Index to the first sheet tab
+        #               2 bytes: Index to the last sheet tab
+        count = work.unpack1 "v"
+        count.times do |idx|
+          @workbook.add_externsheet work[2 + idx * 6, 6].unpack("v3")
+        end
+      end
+
+      def read_supbook work, pos, len
+        return unless @workbook.biff_version == 8
+        # Offset  Size  Contents
+        #      0     2  Number of sheets in the referenced workbook (ctab)
+        #      2  var.  0x0401 = internal reference, 0x3a01 = add-in,
+        #               otherwise the URL of the external workbook followed
+        #               by ctab sheet names (all Unicode strings)
+        ctab = work.unpack1 "v"
+        marker = work[2, 2].unpack1 "v"
+        if marker == 0x0401
+          @workbook.add_supbook type: :internal
+        elsif marker == 0x3a01
+          @workbook.add_supbook type: :addin
+        else
+          url, offset = read_supbook_string work, 2
+          sheets = []
+          ctab.times do
+            name, offset = read_supbook_string work, offset
+            sheets.push name
+          end
+          @workbook.add_supbook type: :external, url: url, sheets: sheets
+        end
+      end
+
+      ##
+      # Read a Unicode string with a 16-bit length field. Returns the string
+      # and the offset of the following data.
+      def read_supbook_string work, offset
+        cch = work[offset, 2].unpack1 "v"
+        wide = (work.getbyte(offset + 2) & 0x01) > 0
+        size = cch * (wide ? 2 : 1)
+        raw = work[offset + 3, size] || ""
+        raw = wide(raw) unless wide
+        [client(raw, "UTF-16LE"), offset + 3 + size]
+      end
+
+      def read_sharedfmla worksheet, work
+        # Offset  Size  Contents
+        #      0     6  Cell range of all cells sharing this formula
+        #      6     1  Not used
+        #      7     1  Number of existing FORMULA records
+        #      8     2  Size of the following formula data (cce)
+        #     10  var.  Formula data (RPN token array)
+        row, _, column, = work.unpack "v2C2"
+        cce = work[8, 2].unpack1 "v"
+        worksheet.add_shared_formula [row, column], work[10, cce]
+      end
+
+      def read_array worksheet, work
+        # Offset  Size  Contents
+        #      0     6  Cell range of the array formula
+        #      6     2  Option flags
+        #      8     4  Not used
+        #     12     2  Size of the following formula data (cce)
+        #     14  var.  Formula data (RPN token array)
+        row, _, column, = work.unpack "v2C2"
+        cce = work[12, 2].unpack1 "v"
+        worksheet.add_shared_formula [row, column], work[14, cce]
+      end
+
       def read_formula worksheet, addr, work
         # Offset  Size  Contents
         #      0     2  Index to row
@@ -410,6 +509,15 @@ module Spreadsheet
         formula = Formula.new
         formula.shared = (opts & 0x08) > 0
         formula.data = work[20..]
+        if @workbook.biff_version == 8
+          cce = work[20, 2].unpack1 "v"
+          formula.parse_context = {
+            tokens: work[22, cce] || "",
+            row: row,
+            column: column,
+            worksheet: worksheet
+          }
+        end
         if rcheck != 0xffff || rtype > 3
           value, = work.unpack "x6E"
           unless value
@@ -419,8 +527,12 @@ module Spreadsheet
           formula.value = value
         elsif rtype == 0
           pos, op, _len, work = get_next_chunk
-          if op == :sharedfmla
-            ## TODO: formula-support in 0.8.0
+          while op == :sharedfmla || op == :array
+            if op == :sharedfmla
+              read_sharedfmla worksheet, work
+            else
+              read_array worksheet, work
+            end
             pos, op, _len, work = get_next_chunk
           end
           if op == :string
@@ -728,6 +840,10 @@ module Spreadsheet
             when :formula  # FORMULA ➜ 6.46
               found = true
               read_formula worksheet, addr, work
+            when :sharedfmla # SHAREDFMLA ➜ 5.94
+              read_sharedfmla worksheet, work
+            when :array    # ARRAY ➜ 6.3
+              read_array worksheet, work
             when :label    # LABEL ➜ 6.59 (BIFF2-BIFF7)
               found = true
               read_label worksheet, addr, work
@@ -874,6 +990,12 @@ module Spreadsheet
             read_format work, pos, len
           when :font       # ●● FONT ➜ 6.43
             read_font work, pos, len
+          when :name       # ○○ NAME ➜ 6.66
+            read_name work, pos, len
+          when :externsheet # ●  EXTERNSHEET ➜ 6.39
+            read_externsheet work, pos, len
+          when :supbook    # ●  SUPBOOK ➜ 6.100
+            read_supbook work, pos, len
           end
           previous_op = op unless op == :continue
         end

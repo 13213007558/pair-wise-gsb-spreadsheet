@@ -27,6 +27,7 @@ module Spreadsheet
       }
       offset :encoding, :boundsheets, :sst
       attr_accessor :bof, :ole
+      attr_reader :defined_names, :externsheets, :supbooks
       attr_writer :date_base
       def self.open io, opts = {}
         Reader.new(opts).read(io)
@@ -41,6 +42,29 @@ module Spreadsheet
         @encoding = enc
         @version = 0x600
         @sst = []
+        @defined_names = []
+        @externsheets = []
+        @supbooks = []
+      end
+
+      ##
+      # Add a defined name read from a NAME record. +entry+ is a Hash with
+      # the keys :name, :tokens, :sheet_index and :flags.
+      def add_defined_name entry
+        @defined_names.push entry
+      end
+
+      ##
+      # Add an EXTERNSHEET entry: [supbook_index, first_sheet, last_sheet]
+      def add_externsheet entry
+        @externsheets.push entry
+      end
+
+      ##
+      # Add a SUPBOOK entry: a Hash with the keys :type (:internal, :addin
+      # or :external), and for external workbooks :url and :sheets.
+      def add_supbook entry
+        @supbooks.push entry
       end
 
       def add_shared_string str

@@ -55,6 +55,11 @@ module Spreadsheet
         super
       end
 
+      def images
+        ensure_rows_read
+        @images
+      end
+
       def ensure_rows_read
         return if @row_addresses
         @dimensions = nil

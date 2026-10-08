@@ -6,6 +6,8 @@ require "spreadsheet/note"
 require "spreadsheet/noteObject"
 require "spreadsheet/excel/error"
 require "spreadsheet/excel/internals"
+require "spreadsheet/excel/image"
+require "spreadsheet/excel/drawing"
 require "spreadsheet/excel/sst_entry"
 require "spreadsheet/excel/worksheet"
 
@@ -18,6 +20,7 @@ module Spreadsheet
     class Reader
       include Spreadsheet::Encodings
       include Spreadsheet::Excel::Internals
+      include Spreadsheet::Excel::Reader::Drawing
 
       ROW_BLOCK_OPS = {
         blank: true, boolerr: true, dbcell: true, formula: true,
@@ -35,6 +38,9 @@ module Spreadsheet
         @current_row_block_offset = nil
         @formats = {}
         BUILTIN_FORMATS.each { |key, fmt| @formats.store key, client(fmt, "UTF-8") }
+        @office_art_continuation = nil
+        @picture_store = []
+        @worksheet_pictures = {}
       end
 
       def decode_rk work
@@ -132,12 +138,12 @@ module Spreadsheet
         # We now have a lot of Note and NoteObjects, but they're not linked
         # So link the noteObject(text) to the note (with author, position)
         # TODO
+        note_objects = @note_ob_list.group_by(&:obj_id).transform_values do |objects|
+          objects.find { |object| object.text.to_s.ascii_only? } ||
+            objects.first
+        end
         @note_list.each do |i|
-          matching_objs = @note_ob_list.select { |j| j.obj_id == i.obj_id }
-          if matching_objs.length > 1
-            puts "ERROR - more than one matching object ID!"
-          end
-          matching_obj = matching_objs.first
+          matching_obj = note_objects[i.obj_id]
           i.text = matching_obj.nil? ? "" : matching_obj.text
           worksheet.add_note i.row, i.col, i.text
         end
@@ -839,8 +845,10 @@ module Spreadsheet
           pos, op, len, work = tuple
           case op
           when @bof, :bof  # ●  BOF Type = worksheet (➜ 6.8)
+            finish_office_art_continuation
             return
           when :eof        # ●  EOF ➜ 6.36
+            finish_office_art_continuation
             postread_workbook
             return
           when :datemode   # ○  DATEMODE ➜ 6.25
@@ -851,10 +859,16 @@ module Spreadsheet
               DateTime.new 1899, 12, 31
             end
           when :continue   # ○  CONTINUE ➜ 6.22
-            case previous_op
-            when :sst      # ●  SST ➜ 6.96
-              continue_sst work, pos, len
+            if @office_art_continuation
+              append_office_art_continuation work
+            else
+              case previous_op
+              when :sst      # ●  SST ➜ 6.96
+                continue_sst work, pos, len
+              end
             end
+          when :drawinggroup
+            start_office_art_continuation :drawinggroup, work
           when :codepage   # ○  CODEPAGE ➜ 6.17
             read_codepage work, pos, len
           when :boundsheet # ●● BOUNDSHEET ➜ 6.12
@@ -875,7 +889,7 @@ module Spreadsheet
           when :font       # ●● FONT ➜ 6.43
             read_font work, pos, len
           end
-          previous_op = op unless op == :continue
+          previous_op = finish_office_art_record(previous_op, op)
         end
       end
 
@@ -885,6 +899,8 @@ module Spreadsheet
         @note_ob_list = []
         @note_list = []
         @note_object = nil
+        @worksheet_pictures[worksheet] = []
+        @office_art_continuation = nil
         previous = nil
         while (tuple = get_next_chunk)
           pos, op, len, work = tuple
@@ -894,6 +910,7 @@ module Spreadsheet
           end
           case op
           when :eof        # ●  EOF ➜ 6.36
+            finish_office_art_continuation worksheet
             postread_worksheet worksheet
             return
             # when :uncalced   # ○  UNCALCED ➜ 6.104
@@ -932,10 +949,9 @@ module Spreadsheet
               @note_object.obj_id = obj_id
             end
             # p work
-          when :drawing # this can be followed by txo in case of a note
-            if previous == :obj
-              # puts "\nDEBUG: found MsDrawing record"
-              # p work
+          when :drawing
+            if office_art_payload?(work)
+              start_office_art_continuation [:drawing, worksheet], work
             end
           when :txo # this contains the length of the note text
             if previous == :drawing
@@ -943,20 +959,28 @@ module Spreadsheet
               # p work
             end
           when :continue # this contains the actual note text
-            if previous == :txo && @note_object
+            if @office_art_continuation
+              append_office_art_continuation work
+            elsif previous == :txo && @note_object
               # puts "\nDEBUG: found Continue record"
               continue_fmt = work.unpack("C")
+              note_text = nil
               if continue_fmt.first == 0
                 # puts "Picking compressed charset"
                 # Skip to offset due to 'v5C' used above
                 text = work.unpack("@1C*")
-                @note_object.text = text.pack("C*")
-              elsif continue_fmt.first == 1
+                note_text = text.pack("C*")
+                @note_object.text = note_text
+                @note_ob_list << @note_object
+                @note_object = nil
+              elsif continue_fmt.first == 1 && @note_object &&
+                @note_object.text.to_s.empty?
                 # puts "Picking uncompressed charset"
                 text = work.unpack("@1S*")
-                @note_object.text = text.pack("U*")
+                note_text = text.pack("U*")
+                @note_object.text = note_text
               end
-              @note_ob_list << @note_object
+              @note_ob_list << @note_object if note_text && @note_object
             end
           when :pagesetup
             read_pagesetup(worksheet, work, pos, len)
@@ -973,8 +997,7 @@ module Spreadsheet
               set_missing_row_address worksheet, work, pos, len
             end
           end
-          previous = op
-          # previous = op unless op == :continue
+          previous = finish_office_art_record(previous, op, worksheet)
         end
       end
 

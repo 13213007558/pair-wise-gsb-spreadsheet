@@ -353,6 +353,7 @@ module Spreadsheet
         useselfs: 0x0160, # ○  USESELFS (Natural Language Formulas) ➜ 6.105
         dsf: 0x0161, # ○  DSF (Double Stream File) ➜ 6.32
         refreshall: 0x01b7, # ○  REFRESHALL
+        drawinggroup: 0x00eb, # MSODRAWINGGROUP
         ########################## ●  Worksheet View Settings Block ➜ 5.5
         window2: 0x023e, # ●  WINDOW2 ➜ 5.110
         scl: 0x00a0, # ○  SCL ➜ 5.92 (BIFF4-BIFF8 only)

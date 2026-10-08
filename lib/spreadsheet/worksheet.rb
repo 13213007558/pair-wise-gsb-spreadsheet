@@ -55,6 +55,7 @@ module Spreadsheet
       @rows = []
       @columns = []
       @links = {}
+      @images = []
       @merged_cells = []
       @protected = false
       @password_hash = 0
@@ -68,6 +69,10 @@ module Spreadsheet
     def freeze!(top, left)
       @froze_top = top.to_i
       @froze_left = left.to_i
+    end
+
+    def images
+      @images
     end
 
     def active # :nodoc:

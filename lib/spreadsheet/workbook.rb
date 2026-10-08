@@ -93,6 +93,10 @@ module Spreadsheet
       @fonts[idx]
     end
 
+    def images
+      @worksheets.flat_map(&:images)
+    end
+
     ##
     # The Format at _idx_, or - if _idx_ is a String -
     # the Format with name == _idx_

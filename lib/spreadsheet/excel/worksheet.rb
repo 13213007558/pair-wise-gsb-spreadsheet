@@ -40,6 +40,11 @@ module Spreadsheet
         @workbook.date_base
       end
 
+      def images
+        ensure_rows_read
+        super
+      end
+
       def margins
         ensure_rows_read
         super

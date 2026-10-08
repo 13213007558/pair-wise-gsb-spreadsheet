@@ -4,6 +4,8 @@ require "spreadsheet/formula"
 require "spreadsheet/link"
 require "spreadsheet/note"
 require "spreadsheet/noteObject"
+require "spreadsheet/excel/image"
+require "spreadsheet/excel/office_art"
 require "spreadsheet/excel/error"
 require "spreadsheet/excel/internals"
 require "spreadsheet/excel/sst_entry"
@@ -34,6 +36,11 @@ module Spreadsheet
         @current_row_block = {}
         @current_row_block_offset = nil
         @formats = {}
+        @office_art = OfficeArt.new
+        @blip_entries = nil
+        @drawing_group_data = String.new
+        @drawing_data_by_sheet = Hash.new { |hash, key| hash[key] = [] }
+        @picture_object_ids_by_sheet = Hash.new { |hash, key| hash[key] = [] }
         BUILTIN_FORMATS.each { |key, fmt| @formats.store key, client(fmt, "UTF-8") }
       end
 
@@ -854,6 +861,8 @@ module Spreadsheet
             case previous_op
             when :sst      # ●  SST ➜ 6.96
               continue_sst work, pos, len
+            when :drawing_group
+              @drawing_group_data << work
             end
           when :codepage   # ○  CODEPAGE ➜ 6.17
             read_codepage work, pos, len
@@ -868,6 +877,8 @@ module Spreadsheet
             #       with EXTSST
           when :extsst     # ●  EXTSST ➜ 6.40
             read_extsst work, pos, len
+          when :drawing_group
+            @drawing_group_data = work.dup
           when :style      # ●● STYLE ➜ 6.99
             read_style work, pos, len
           when :format     # ○○ FORMAT (Number Format) ➜ 6.45
@@ -885,6 +896,8 @@ module Spreadsheet
         @note_ob_list = []
         @note_list = []
         @note_object = nil
+        @drawing_data_by_sheet[worksheet] = []
+        @picture_object_ids_by_sheet[worksheet] = []
         previous = nil
         while (tuple = get_next_chunk)
           pos, op, len, work = tuple
@@ -894,6 +907,7 @@ module Spreadsheet
           end
           case op
           when :eof        # ●  EOF ➜ 6.36
+            read_worksheet_images worksheet
             postread_worksheet worksheet
             return
             # when :uncalced   # ○  UNCALCED ➜ 6.104
@@ -931,28 +945,26 @@ module Spreadsheet
               @note_object = NoteObject.new
               @note_object.obj_id = obj_id
             end
+            @picture_object_ids_by_sheet[worksheet] << obj_id if ot == OfficeArt::OBJECT_PICTURE
             # p work
-          when :drawing # this can be followed by txo in case of a note
-            if previous == :obj
-              # puts "\nDEBUG: found MsDrawing record"
-              # p work
-            end
+          when :drawing
+            @drawing_data_by_sheet[worksheet] << [work.dup]
           when :txo # this contains the length of the note text
             if previous == :drawing
               # puts "\nDEBUG: found TxO record"
               # p work
             end
-          when :continue # this contains the actual note text
-            if previous == :txo && @note_object
-              # puts "\nDEBUG: found Continue record"
+          when :continue
+            case previous
+            when :drawing
+              @drawing_data_by_sheet[worksheet].last << work
+            when :txo
+              next unless @note_object
               continue_fmt = work.unpack("C")
               if continue_fmt.first == 0
-                # puts "Picking compressed charset"
-                # Skip to offset due to 'v5C' used above
                 text = work.unpack("@1C*")
                 @note_object.text = text.pack("C*")
               elsif continue_fmt.first == 1
-                # puts "Picking uncompressed charset"
                 text = work.unpack("@1S*")
                 @note_object.text = text.pack("U*")
               end
@@ -974,7 +986,6 @@ module Spreadsheet
             end
           end
           previous = op
-          # previous = op unless op == :continue
         end
       end
 
@@ -1206,6 +1217,46 @@ module Spreadsheet
         @note.obj_id = obj_id
         # Pop it on the list to be sorted in postread_worksheet
         @note_list << @note
+      end
+
+      def read_worksheet_images worksheet
+        chunks = @drawing_data_by_sheet[worksheet]
+        shape_groups = chunks.map { |parts| @office_art.pictures(parts.join) }.reject(&:empty?)
+        return if shape_groups.empty?
+
+        @blip_entries ||= @office_art.blips(@drawing_group_data)
+        shapes = shape_groups.flatten
+        object_ids = @picture_object_ids_by_sheet[worksheet]
+        shapes.each_with_index do |shape, index|
+          image = Image.new(worksheet: worksheet, object_identifier: object_ids[index])
+          if (anchor = shape[:anchor])
+            anchor.each { |key, value| image.public_send("#{key}=", value) }
+          end
+          blip_index = shape[:blip_index]
+          fallback_index = shape[:blip_fallback_index]
+          if (blip_index.nil? || blip_index > @blip_entries.size) && fallback_index
+            blip_index = fallback_index
+          end
+          resolve_image_blip image, blip_index, @blip_entries
+          worksheet.add_image image
+        end
+      end
+
+      def resolve_image_blip image, blip_index, entries
+        return image.mark(:unknown, "missing BLIP reference") unless blip_index
+
+        entry = entries[blip_index - 1]
+        unless entry
+          image.blip_id = blip_index
+          return image.mark(:out_of_bounds, "BLIP ##{blip_index} is not present")
+        end
+
+        image.blip_id = entry.type
+        return image.mark(:external, "linked picture") if entry.external?
+        return image.mark(:unknown, "unsupported BLIP type #{entry.type}") unless entry.data
+
+        image.data = entry.data
+        image.mark(:embedded)
       end
 
       def read_sheet_protection worksheet, op, data

@@ -30,7 +30,7 @@ module Spreadsheet
     include Enumerable
 
     attr_accessor :name, :selected, :workbook, :password_hash
-    attr_reader :rows, :columns, :merged_cells, :margins, :pagesetup
+    attr_reader :rows, :columns, :merged_cells, :margins, :pagesetup, :images
     attr_reader :froze_top, :froze_left
     enum :visibility, :visible, :hidden, :strong_hidden
     def initialize opts = {}
@@ -56,6 +56,7 @@ module Spreadsheet
       @columns = []
       @links = {}
       @merged_cells = []
+      @images = []
       @protected = false
       @password_hash = 0
       @visibility = opts[:visibility]
@@ -63,6 +64,11 @@ module Spreadsheet
 
     def has_frozen_panel?
       @froze_top > 0 or @froze_left > 0
+    end
+
+    def add_image image
+      @images << image
+      image
     end
 
     def freeze!(top, left)

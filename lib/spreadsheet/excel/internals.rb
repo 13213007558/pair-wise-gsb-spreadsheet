@@ -280,6 +280,7 @@ module Spreadsheet
         datemode: 0x0022, # ○  DATEMODE ➜ 6.25
         dbcell: 0x0a0b, # ○  DBCELL
         dimensions: 0x0200, # ●  DIMENSIONS ➜ 6.31
+        drawing_group: 0x00eb,
         eof: 0x000a, # ●  EOF ➜ 6.36
         font: 0x0031, # ●● FONT ➜ 6.43
         format: 0x041e, # ○○ FORMAT (Number Format) ➜ 6.45
